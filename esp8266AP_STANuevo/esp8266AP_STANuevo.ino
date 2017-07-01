@@ -1,15 +1,22 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
-#include <DHT.h>
+#include <SoftwareSerial.h>
 
-#define DHTPIN 2
-#define DHTTYPE DHT22
+SoftwareSerial mySerial(12, 14); // RX, TX pins on Ardunio
 
 ESP8266WebServer server(80);
-DHT dht(DHTPIN, DHTTYPE);
 
 WiFiClient client;
+
+int co2 =0;
+double multiplier = 10;// 1 for 2% =20000 PPM, 10 for 20% = 200,000 PPM
+uint8_t buffer[25];
+uint8_t ind =0;
+uint8_t index =0;
+
+int fill_buffer();  // function prototypes here
+int format_output();
 
 char ssid[20];
 char pass[20];
@@ -19,30 +26,15 @@ int pass_tamano = 0;
 
 bool conectado = false;
 bool enviarDatos = false;
-float h = 0.0, t = 0.0, hic = 0.0;
 const int nroEstacion = 13;
-const char* nombreEstacion = "estacionMed";
-const char* pagina = "www.labea.criba.edu.ar";
+const char* nombreEstacion = "esp8266";
+const char* pagina = "www.labea.criba.edu.a";
 
 unsigned long tiempo = 0;
 unsigned long intervaloMed = 5000;
 unsigned long intervaloConexion = 600 * 1000; // diez min
 
 void principal() {
-
-  String conexion = (conectado) ? "conectado" : "no conectado";
-  
-  String json = "{";
-  json += "\"nombre\":" + String(nombreEstacion);
-  json += ", \"numero\":" + String(nroEstacion);
-  json += "\"conexion\":\"" + conexion + "\"";
-  json += ", \"WiFi\":\"" + String(ssid) + "\"";
-  json += ", \"IP\":\"" + WiFi.localIP().toString() + "\"";
-  json += ", \"enviarDatos\":" + String(enviarDatos);
-  json += "}";
-  server.send(200, "text/json", json);
-  Serial.println("Enviando datos: " + json);
-  json = String();
     
   String pral = "<!DOCTYPE html>"
                 "<html lang='es'>"
@@ -312,12 +304,34 @@ void intento_conexion() {
 //*****  S E T U P  **************
 void setup() {
   Serial.begin(115200);
+  mySerial.begin(9600); // Start serial communications with sensor
+  mySerial.println("K 0");  // Set Command mode
+  mySerial.println("G");
+  mySerial.println("M6"); // send Mode for Z and z outputs
+  // "Z xxxxx z xxxxx" (CO2 filtered and unfiltered)
+
+  mySerial.println("K 2");  // set streaming mode
+  
   EEPROM.begin(4096);
   WiFi.softAP(nombreEstacion);
 
   server.on("/", principal);
 
   server.on("/datos", HTTP_GET, []() {
+    mySerial.println("Z");
+  
+    fill_buffer();  // function call that reacds CO2 sensor and fills buffer
+   
+    Serial.print("Buffer contains: ");
+    for(int j=0; j<ind; j++)Serial.print(buffer[j],HEX);
+    index = 0;
+    format_output();
+    Serial.print(" Raw PPM        ");
+   
+    index = 8;  // In ASCII buffer, filtered value is offset from raw by 8 bytes
+    format_output();
+    Serial.println(" Filtered PPM\n\n");
+      
     String json = "{";
     //json += "\"voltaje\":"+String(ESP.getVcc()); //ADC_MODE(ADC_VCC); no anda
     json += "\"temperatura\":" + String(t);
@@ -363,7 +377,6 @@ void setup() {
   server.on("/config", wifi_conf);
   server.on("/reconf", reconf);
 
-  dht.begin();
   server.begin();
   Serial.println();
   Serial.println("Webserver iniciado");
@@ -380,24 +393,33 @@ void setup() {
 //*****   L O O P   **************
 void loop() {
   server.handleClient();
-
-  tiempo = millis();
-  if (tiempo % intervaloMed == 0) {
-    do {
-      h = dht.readHumidity();
-      t = dht.readTemperature();
-    } while (isnan(h) || isnan(t));
-
-    hic = dht.computeHeatIndex(t, h, false);
-
-    Serial.println("Temp: " + (String)t + "*C,\t Hum: " + (String)h + "%,\t HI: " + (String)hic + "*C");
-  }
-  if (enviarDatos && conectado && tiempo % intervaloConexion == 0) {
-    enviarValores(t, h, nroEstacion);
-    //WiFi.forceSleepBegin();
-    //WiFi.forceSleepWake();
-    //delay(100)
-    //VER hay que hacer una funcion para reconectar como si se reseteara todo
-    //VER ESP.deepSleep(sendingPeriod*1000000);
-  }
 }
+
+int fill_buffer(void){
+  
+
+// Fill buffer with sensor ascii data
+ind = 0;
+while(buffer[ind-1] != 0x0A &&ind<50){  // Read sensor and fill buffer up to 0XA = CR
+  if(mySerial.available()){
+    buffer[ind] = mySerial.read();
+    ind++;
+    } 
+  }
+  // buffer() now filled with sensor ascii data
+  // ind contains the number of characters loaded into buffer up to 0xA =  CR
+  ind = ind -2; // decrement buffer to exactly match last numerical character
+  }
+
+ int format_output(void){ // read buffer, extract 6 ASCII chars, convert to PPM and print
+  co2 = buffer[15-index]-0x30;
+  co2 = co2+((buffer[14-index]-0x30)*10);
+  co2 +=(buffer[13-index]-0x30)*100;
+  co2 +=(buffer[12-index]-0x30)*1000;
+  co2 +=(buffer[11-index]-0x30)*10000;
+  Serial.print("\n CO2 = ");
+  Serial.print(co2*multiplier,0);
+// Serial.print(" PPM,");
+//    Serial.print("\n");
+  delay(500);
+ }
